@@ -79,6 +79,26 @@ button{
   box-shadow:0 2px 10px #0003;
 }
 
+#routePanel{
+  display:none;
+  position:absolute;
+  z-index:1000;
+  left:10px;
+  bottom:max(24px,env(safe-area-inset-bottom));
+  max-width:min(360px,calc(100% - 120px));
+  background:#fff;
+  padding:9px;
+  border-radius:8px;
+  box-shadow:0 2px 10px #0003;
+  font-size:12px;
+}
+
+#clearRoute{
+  width:100%;
+  margin-top:7px;
+  padding:8px;
+}
+
 .leaflet-popup-content{
   font-size:15px;
   line-height:1.5;
@@ -93,6 +113,19 @@ button{
   color:#fff!important;
   text-decoration:none;
   border-radius:7px;
+}
+
+.route-map{
+  display:block;
+  width:100%;
+  margin-top:8px;
+  padding:8px;
+  border:1px solid #111;
+  background:#fff;
+  color:#111;
+  border-radius:7px;
+  font-size:15px;
+  font-weight:700;
 }
 
 .distance{
@@ -143,6 +176,18 @@ button{
 
 <button id="backIncident">災害地点へ戻る</button>
 
+<div id="routePanel" role="status" aria-live="polite">
+  <div id="routeSummary"></div>
+  <div>参考経路です。消防車両の通行可否・道路幅・規制・現場状況は保証されません。</div>
+  <div>検索時は現在地と選択した水利の座標だけを経路サーバーへ送信します。</div>
+  <div>
+    経路：<a href="https://project-osrm.org/" target="_blank" rel="noopener">OSRM</a>・
+    地図：<a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a>（
+    <a href="https://www.openstreetmap.org/fixthemap" target="_blank" rel="noopener">地図を修正</a>）
+  </div>
+  <button id="clearRoute">経路線を消す</button>
+</div>
+
 <div class="legend">
   <div><img src="images/icon-1.png"> 消火栓</div>
   <div><img src="images/icon-2.png"> 防火水槽</div>
@@ -188,12 +233,19 @@ const ti=L.icon({
 const st=document.getElementById('status');
 const manualArea=document.getElementById('manualArea');
 const backIncident=document.getElementById('backIncident');
+const routePanel=document.getElementById('routePanel');
+const routeSummary=document.getElementById('routeSummary');
+const clearRoute=document.getElementById('clearRoute');
 
 let incident=null;
 let incidentLatLng=null;
 
 let circles=[];
 let me=null;
+let meLatLng=null;
+let routeLine=null;
+let routeAbortController=null;
+let routeRequestInProgress=false;
 
 let waterFeatures=[];
 
@@ -272,6 +324,13 @@ function pop(p,ll){
         rel="noopener">
        Googleマップで経路
      </a>`;
+
+  html+=
+    `<button class="route-map"
+       data-lat="${ll.lat}"
+       data-lng="${ll.lng}">
+       地図上に経路表示
+     </button>`;
 
   return html;
 }
@@ -634,6 +693,8 @@ document.getElementById('loc').onclick=
         p.coords.longitude
       ];
 
+      meLatLng=L.latLng(ll);
+
 
       if(me){
         map.removeLayer(me);
@@ -676,6 +737,199 @@ document.getElementById('loc').onclick=
 
   );
 
+};
+
+
+function getCurrentLocation(){
+
+  return new Promise((resolve,reject)=>{
+
+    if(!navigator.geolocation){
+      reject(new Error('この端末では現在地取得を利用できません'));
+      return;
+    }
+
+    navigator.geolocation.getCurrentPosition(
+      p=>{
+        meLatLng=L.latLng(
+          p.coords.latitude,
+          p.coords.longitude
+        );
+
+        if(me){
+          map.removeLayer(me);
+        }
+
+        me=L.circleMarker(
+          meLatLng,
+          {
+            radius:8,
+            weight:3,
+            fillOpacity:.7
+          }
+        )
+        .addTo(map)
+        .bindPopup('現在地');
+
+        resolve(meLatLng);
+      },
+      e=>reject(new Error(
+        e.code===1
+          ? '現在地の利用が許可されていません'
+          : '現在地を取得できません: '+e.message
+      )),
+      {
+        enableHighAccuracy:true,
+        timeout:10000,
+        maximumAge:15000
+      }
+    );
+  });
+}
+
+
+function clearRouteLine(){
+
+  if(routeAbortController){
+    routeAbortController.abort();
+    routeAbortController=null;
+  }
+
+  routeRequestInProgress=false;
+
+  if(routeLine){
+    map.removeLayer(routeLine);
+    routeLine=null;
+  }
+
+  routePanel.style.display='none';
+}
+
+
+async function showRoute(destination){
+
+  if(routeRequestInProgress){
+    st.textContent='経路を取得中です';
+    return;
+  }
+
+  routeRequestInProgress=true;
+  st.textContent='現在地を確認しています…';
+
+  try{
+    const origin=meLatLng || await getCurrentLocation();
+
+    routeAbortController=new AbortController();
+    const timeoutId=setTimeout(
+      ()=>routeAbortController.abort(),
+      10000
+    );
+
+    const coordinates=
+      `${origin.lng},${origin.lat};${destination.lng},${destination.lat}`;
+
+    const url=
+      'https://routing.openstreetmap.de/routed-car/route/v1/driving/'
+      +coordinates
+      +'?overview=full&geometries=geojson&steps=false';
+
+    let response;
+
+    try{
+      response=await fetch(
+        url,
+        {
+          signal:routeAbortController.signal,
+          headers:{'Accept':'application/json'}
+        }
+      );
+    }finally{
+      clearTimeout(timeoutId);
+    }
+
+    if(!response.ok){
+      throw new Error(`ルーティングAPI HTTP ${response.status}`);
+    }
+
+    const data=await response.json();
+
+    if(data.code!=='Ok' || !data.routes || !data.routes[0]){
+      throw new Error('道路経路が見つかりませんでした');
+    }
+
+    if(routeLine){
+      map.removeLayer(routeLine);
+    }
+
+    const route=data.routes[0];
+
+    routeLine=L.geoJSON(
+      route.geometry,
+      {
+        style:{
+          color:'#1261d8',
+          weight:7,
+          opacity:.85
+        },
+        interactive:false
+      }
+    ).addTo(map);
+
+    routeLine.bringToBack();
+
+    map.fitBounds(
+      routeLine.getBounds(),
+      {
+        paddingTopLeft:[20,150],
+        paddingBottomRight:[20,100],
+        maxZoom:17
+      }
+    );
+
+    routeSummary.textContent=
+      `参考経路：約${(route.distance/1000).toFixed(1)}km・約${Math.max(1,Math.round(route.duration/60))}分（OSRM）`;
+
+    routePanel.style.display='block';
+    st.textContent='参考経路を表示しました';
+
+  }catch(e){
+    const message=e.name==='AbortError'
+      ? '経路取得がタイムアウトしました'
+      : e.message;
+
+    st.textContent=
+      `経路を表示できません: ${message}。Googleマップで経路は引き続き使えます。`;
+  }finally{
+    routeAbortController=null;
+    routeRequestInProgress=false;
+  }
+}
+
+
+document.addEventListener('click',e=>{
+
+  const button=e.target.closest('.route-map');
+
+  if(!button){
+    return;
+  }
+
+  const lat=Number(button.dataset.lat);
+  const lng=Number(button.dataset.lng);
+
+  if(!Number.isFinite(lat) || !Number.isFinite(lng)){
+    st.textContent='水利の座標を読み取れません';
+    return;
+  }
+
+  map.closePopup();
+  showRoute(L.latLng(lat,lng));
+});
+
+
+clearRoute.onclick=()=>{
+  clearRouteLine();
+  st.textContent='経路線を消しました';
 };
 
 
