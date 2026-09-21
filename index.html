@@ -1,0 +1,706 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+
+<title>消防水利マップ V3</title>
+
+<link rel="stylesheet"
+ href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+
+<style>
+html,body,#map{
+  height:100%;
+  margin:0;
+}
+
+body{
+  font-family:system-ui,-apple-system,"Noto Sans JP",sans-serif;
+}
+
+#panel{
+  position:absolute;
+  z-index:1000;
+  left:10px;
+  right:10px;
+  top:max(10px,env(safe-area-inset-top));
+  background:#fff;
+  padding:10px;
+  border-radius:10px;
+  box-shadow:0 2px 12px #0003;
+}
+
+.row{
+  display:flex;
+  gap:8px;
+}
+
+.row>*{
+  flex:1;
+}
+
+button,input{
+  font-size:16px;
+  padding:11px;
+  border-radius:8px;
+  border:1px solid #aaa;
+  box-sizing:border-box;
+}
+
+button{
+  font-weight:700;
+  background:#fff;
+}
+
+#run{
+  background:#111;
+  color:#fff;
+}
+
+#status{
+  font-size:12px;
+  margin-top:6px;
+}
+
+#manualArea{
+  display:none;
+  margin-top:8px;
+}
+
+#backIncident{
+  display:none;
+  position:absolute;
+  z-index:1000;
+  right:10px;
+  top:150px;
+  width:auto;
+  background:#fff;
+  box-shadow:0 2px 10px #0003;
+}
+
+.leaflet-popup-content{
+  font-size:15px;
+  line-height:1.5;
+}
+
+.nav{
+  display:block;
+  margin-top:8px;
+  padding:8px;
+  text-align:center;
+  background:#111;
+  color:#fff!important;
+  text-decoration:none;
+  border-radius:7px;
+}
+
+.distance{
+  margin-top:5px;
+  font-weight:700;
+}
+
+.legend{
+  position:absolute;
+  z-index:999;
+  right:10px;
+  bottom:24px;
+  background:#fff;
+  padding:7px 9px;
+  border-radius:8px;
+  font-size:12px;
+  box-shadow:0 2px 10px #0002;
+}
+
+.legend img{
+  width:22px;
+  vertical-align:middle;
+}
+</style>
+</head>
+
+<body>
+
+<div id="map"></div>
+
+<div id="panel">
+
+  <div class="row">
+    <button id="run">災害地点を表示</button>
+    <button id="loc">現在地を表示</button>
+  </div>
+
+  <div id="manualArea">
+    <div class="row">
+      <input id="manual" placeholder="マピオンURLを貼り付け">
+      <button id="manualRun">表示</button>
+    </div>
+  </div>
+
+  <div id="status">水利データ読込中…</div>
+
+</div>
+
+<button id="backIncident">災害地点へ戻る</button>
+
+<div class="legend">
+  <div><img src="images/icon-1.png"> 消火栓</div>
+  <div><img src="images/icon-2.png"> 防火水槽</div>
+</div>
+
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+<script>
+
+const WATER_ZOOM = 15;
+
+const map = L.map('map',{
+  zoomControl:false
+}).setView([36.31,139.20],13);
+
+L.control.zoom({
+  position:'bottomleft'
+}).addTo(map);
+
+L.tileLayer(
+  'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+  {
+    maxZoom:19,
+    attribution:'&copy; OpenStreetMap contributors'
+  }
+).addTo(map);
+
+
+const hi=L.icon({
+  iconUrl:'images/icon-1.png',
+  iconSize:[30,30],
+  iconAnchor:[15,15]
+});
+
+const ti=L.icon({
+  iconUrl:'images/icon-2.png',
+  iconSize:[30,30],
+  iconAnchor:[15,15]
+});
+
+
+const st=document.getElementById('status');
+const manualArea=document.getElementById('manualArea');
+const backIncident=document.getElementById('backIncident');
+
+let incident=null;
+let incidentLatLng=null;
+
+let circles=[];
+let me=null;
+
+let waterFeatures=[];
+
+const waterLayer=L.layerGroup().addTo(map);
+
+
+function esc(s){
+  return String(s??'').replace(
+    /[&<>"']/g,
+    c=>({
+      '&':'&amp;',
+      '<':'&lt;',
+      '>':'&gt;',
+      '"':'&quot;',
+      "'":'&#39;'
+    }[c])
+  );
+}
+
+
+function distanceFromIncident(ll){
+
+  if(!incidentLatLng){
+    return '';
+  }
+
+  const d=map.distance(
+    incidentLatLng,
+    ll
+  );
+
+  if(d<1000){
+    return `${Math.round(d)}m`;
+  }
+
+  return `${(d/1000).toFixed(1)}km`;
+}
+
+
+function pop(p,ll){
+
+  let a=[
+    ['種別',p.kind],
+    ['番号',p.number],
+    ['設置場所',p['設置場所']],
+    ['目標物',p['目標物']],
+    ['所管分団',p['所管分団']],
+    ['容量',p['容量']],
+    ['口径',p['消火栓口径']||p.KOUKEI],
+    ['型式',p['消火栓型式']],
+    ['種類',p['消火栓種類']]
+  ].filter(x=>x[1]);
+
+  let html=a.map(
+    x=>`<b>${esc(x[0])}</b>：${esc(x[1])}`
+  ).join('<br>');
+
+
+  if(incidentLatLng){
+
+    html+=
+      `<div class="distance">
+       災害地点から：約${distanceFromIncident(ll)}
+       </div>`;
+  }
+
+
+  const destination=
+    encodeURIComponent(`${ll.lat},${ll.lng}`);
+
+
+  html+=
+    `<a class="nav"
+        href="https://www.google.com/maps/dir/?api=1&destination=${destination}"
+        target="_blank"
+        rel="noopener">
+       Googleマップで経路
+     </a>`;
+
+  return html;
+}
+
+
+
+function updateWater(){
+
+  waterLayer.clearLayers();
+
+  const zoom=map.getZoom();
+
+
+  if(zoom<WATER_ZOOM){
+
+    if(waterFeatures.length){
+      st.textContent=
+        `水利 ${waterFeatures.length.toLocaleString()}件読込済・拡大すると表示`;
+    }
+
+    return;
+  }
+
+
+  const bounds=map.getBounds();
+
+  let count=0;
+
+
+  for(const f of waterFeatures){
+
+    if(!f.geometry ||
+       f.geometry.type!=='Point'){
+      continue;
+    }
+
+
+    const c=f.geometry.coordinates;
+
+    const lng=c[0];
+    const lat=c[1];
+
+    const ll=L.latLng(lat,lng);
+
+
+    if(!bounds.contains(ll)){
+      continue;
+    }
+
+
+    const marker=L.marker(
+      ll,
+      {
+        icon:
+          f.properties.kind==='防火水槽'
+          ? ti
+          : hi
+      }
+    );
+
+
+    marker.bindPopup(
+      ()=>pop(f.properties,marker.getLatLng())
+    );
+
+
+    marker.addTo(waterLayer);
+
+    count++;
+  }
+
+
+  if(incidentLatLng){
+
+    st.textContent=
+      `✓ 災害地点を表示中　水利 ${count}件`;
+
+  }else{
+
+    st.textContent=
+      `表示範囲の水利 ${count}件`;
+  }
+}
+
+
+
+fetch('water.geojson')
+
+.then(r=>{
+
+  if(!r.ok){
+    throw new Error(
+      `HTTP ${r.status}`
+    );
+  }
+
+  return r.json();
+})
+
+.then(g=>{
+
+  waterFeatures=g.features || [];
+
+  updateWater();
+
+})
+
+.catch(e=>{
+
+  st.textContent=
+    '水利データ読込失敗: '+e.message;
+});
+
+
+
+function ang(s){
+
+  let a=String(s||'')
+    .split('/')
+    .map(Number);
+
+  if(a.some(Number.isNaN)){
+    return NaN;
+  }
+
+  if(a.length===3){
+    return a[0]+a[1]/60+a[2]/3600;
+  }
+
+  if(a.length===2){
+    return a[0]+a[1]/60;
+  }
+
+  return a[0];
+}
+
+
+
+function ext(s){
+
+  let m=String(s||'')
+    .match(/https?:\/\/[^\s<>"']+/i);
+
+  if(!m){
+    return null;
+  }
+
+
+  try{
+
+    let u=new URL(
+      m[0].replace(
+        /[、。)\]}>]+$/g,
+        ''
+      )
+    );
+
+
+    if(u.pathname.startsWith('/m2/')){
+
+      let a=u.pathname
+        .slice(4)
+        .split(',')
+        .map(Number);
+
+      return {
+        lat:a[0],
+        lng:a[1]
+      };
+    }
+
+
+    let la=u.searchParams.get('lat');
+
+    let lo=
+      u.searchParams.get('lon') ||
+      u.searchParams.get('lng') ||
+      u.searchParams.get('long');
+
+
+    if(la&&lo){
+
+      return {
+        lat:+la,
+        lng:+lo
+      };
+    }
+
+
+    let ll=u.searchParams.get('ll');
+
+    if(ll){
+
+      let a=ll
+        .split(',')
+        .map(Number);
+
+      return {
+        lat:a[0],
+        lng:a[1]
+      };
+    }
+
+
+    let nl=u.searchParams.get('nl');
+    let el=u.searchParams.get('el');
+
+    if(nl&&el){
+
+      return {
+        lat:ang(nl),
+        lng:ang(el)
+      };
+    }
+
+  }catch(e){}
+
+
+  return null;
+}
+
+
+
+function conv(a,b){
+
+  return {
+    lat:
+      a
+      -.00010695*a
+      +.000017464*b
+      +.0046017,
+
+    lng:
+      b
+      -.000046038*a
+      -.000083043*b
+      +.010040
+  };
+}
+
+
+
+function show(s){
+
+  let c=ext(s);
+
+
+  if(!c ||
+     !Number.isFinite(c.lat) ||
+     !Number.isFinite(c.lng)){
+
+    st.textContent=
+      'マピオンURLから座標を取得できません';
+
+    manualArea.style.display='block';
+
+    return;
+  }
+
+
+  let w=conv(c.lat,c.lng);
+
+
+  incidentLatLng=
+    L.latLng(w.lat,w.lng);
+
+
+  if(incident){
+    map.removeLayer(incident);
+  }
+
+
+  circles.forEach(
+    x=>map.removeLayer(x)
+  );
+
+  circles=[];
+
+
+  incident=
+    L.marker(incidentLatLng)
+      .addTo(map)
+      .bindPopup('<b>災害地点</b>')
+      .openPopup();
+
+
+  [100,200,300].forEach(r=>{
+
+    circles.push(
+
+      L.circle(
+        incidentLatLng,
+        {
+          radius:r,
+          fill:false,
+          weight:2
+        }
+      ).addTo(map)
+
+    );
+
+  });
+
+
+  map.setView(
+    incidentLatLng,
+    16
+  );
+
+
+  manualArea.style.display='none';
+
+  backIncident.style.display='block';
+
+  st.textContent=
+    '✓ 災害地点を表示しました';
+
+}
+
+
+
+document.getElementById('run').onclick=
+async()=>{
+
+  try{
+
+    const text=
+      await navigator.clipboard.readText();
+
+    show(text);
+
+  }catch(e){
+
+    st.textContent=
+      'クリップボードを読めません。下の欄へマピオンURLを貼り付けてください。';
+
+    manualArea.style.display='block';
+  }
+
+};
+
+
+
+document.getElementById('manualRun').onclick=
+()=>show(
+  document.getElementById('manual').value
+);
+
+
+
+document.getElementById('loc').onclick=
+()=>{
+
+  navigator.geolocation.getCurrentPosition(
+
+    p=>{
+
+      let ll=[
+        p.coords.latitude,
+        p.coords.longitude
+      ];
+
+
+      if(me){
+        map.removeLayer(me);
+      }
+
+
+      me=L.circleMarker(
+        ll,
+        {
+          radius:8,
+          weight:3,
+          fillOpacity:.7
+        }
+      )
+      .addTo(map)
+      .bindPopup('現在地');
+
+
+      map.panTo(ll);
+
+
+      st.textContent=
+        `現在地取得（精度 約${Math.round(p.coords.accuracy)}m）`;
+
+    },
+
+
+    e=>{
+
+      st.textContent=
+        '現在地を取得できません: '+e.message;
+
+    },
+
+
+    {
+      enableHighAccuracy:true,
+      timeout:10000
+    }
+
+  );
+
+};
+
+
+
+backIncident.onclick=()=>{
+
+  if(!incidentLatLng){
+    return;
+  }
+
+  map.setView(
+    incidentLatLng,
+    16
+  );
+
+};
+
+
+
+map.on(
+  'moveend',
+  updateWater
+);
+
+</script>
+
+</body>
+</html>
