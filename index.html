@@ -652,6 +652,23 @@ function show(s){
 
 
 
+// 共有ショートカットから # の後ろにMapion URLが渡された場合は自動表示
+const sharedMapion=
+  location.hash.length>1
+    ? location.hash.slice(1)
+    : '';
+
+if(sharedMapion){
+
+  try{
+    show(decodeURIComponent(sharedMapion));
+  }catch(e){
+    show(sharedMapion);
+  }
+
+}
+
+
 document.getElementById('run').onclick=
 async()=>{
 
