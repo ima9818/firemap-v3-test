@@ -660,6 +660,24 @@ async()=>{
     const text=
       await navigator.clipboard.readText();
 
+    const debugParsed=ext(text);
+    const debugInfo=[
+      '【クリップボード診断】',
+      'readText: 成功',
+      '文字数: '+text.length,
+      'JSON: '+JSON.stringify(text),
+      '先頭コード: '+(text.length ? text.charCodeAt(0) : 'なし'),
+      '末尾コード: '+(text.length ? text.charCodeAt(text.length-1) : 'なし'),
+      'nl/el解析: '+(
+        debugParsed &&
+        Number.isFinite(debugParsed.lat) &&
+        Number.isFinite(debugParsed.lng)
+          ? '成功 ('+debugParsed.lat+', '+debugParsed.lng+')'
+          : '失敗'
+      )
+    ].join('\n');
+
+    alert(debugInfo);
     show(text);
 
   }catch(e){
