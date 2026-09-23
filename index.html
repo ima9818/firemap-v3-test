@@ -243,6 +243,7 @@ let incidentLatLng=null;
 let circles=[];
 let me=null;
 let meLatLng=null;
+let locationWatchId=null;
 let routeLine=null;
 let routeAbortController=null;
 let routeRequestInProgress=false;
@@ -711,62 +712,84 @@ document.getElementById('manualRun').onclick=
 
 
 
-document.getElementById('loc').onclick=
-()=>{
+function updateCurrentMarker(p,pan=false){
 
-  navigator.geolocation.getCurrentPosition(
-
-    p=>{
-
-      let ll=[
-        p.coords.latitude,
-        p.coords.longitude
-      ];
-
-      meLatLng=L.latLng(ll);
-
-
-      if(me){
-        map.removeLayer(me);
-      }
-
-
-      me=L.circleMarker(
-        ll,
-        {
-          radius:8,
-          weight:3,
-          fillOpacity:.7
-        }
-      )
-      .addTo(map)
-      .bindPopup('現在地');
-
-
-      map.panTo(ll);
-
-
-      st.textContent=
-        `現在地取得（精度 約${Math.round(p.coords.accuracy)}m）`;
-
-    },
-
-
-    e=>{
-
-      st.textContent=
-        '現在地を取得できません: '+e.message;
-
-    },
-
-
-    {
-      enableHighAccuracy:true,
-      timeout:10000
-    }
-
+  meLatLng=L.latLng(
+    p.coords.latitude,
+    p.coords.longitude
   );
 
+  if(me){
+    me.setLatLng(meLatLng);
+  }else{
+    me=L.circleMarker(
+      meLatLng,
+      {
+        radius:8,
+        weight:3,
+        fillOpacity:.7
+      }
+    )
+    .addTo(map)
+    .bindPopup('現在地');
+  }
+
+  if(pan){
+    map.panTo(meLatLng);
+  }
+}
+
+
+function startLocationWatch(panFirst=false){
+
+  if(!navigator.geolocation){
+    st.textContent='この端末では現在地取得を利用できません';
+    return;
+  }
+
+  if(locationWatchId!==null){
+    if(panFirst && meLatLng){
+      map.panTo(meLatLng);
+    }
+    return;
+  }
+
+  let first=true;
+
+  st.textContent='現在地を追跡しています…';
+
+  locationWatchId=
+    navigator.geolocation.watchPosition(
+      p=>{
+        updateCurrentMarker(
+          p,
+          panFirst && first
+        );
+
+        if(first){
+          st.textContent=
+            `現在地追跡中（精度 約${Math.round(p.coords.accuracy)}m）`;
+          first=false;
+        }
+      },
+      e=>{
+        st.textContent=
+          e.code===1
+            ? '現在地の利用が許可されていません'
+            : '現在地を取得できません: '+e.message;
+      },
+      {
+        enableHighAccuracy:true,
+        timeout:10000,
+        maximumAge:0
+      }
+    );
+}
+
+
+document.getElementById('loc').onclick=
+()=>{
+  startLocationWatch(true);
 };
 
 
@@ -781,25 +804,10 @@ function getCurrentLocation(){
 
     navigator.geolocation.getCurrentPosition(
       p=>{
-        meLatLng=L.latLng(
-          p.coords.latitude,
-          p.coords.longitude
-        );
+        updateCurrentMarker(p,false);
 
-        if(me){
-          map.removeLayer(me);
-        }
-
-        me=L.circleMarker(
-          meLatLng,
-          {
-            radius:8,
-            weight:3,
-            fillOpacity:.7
-          }
-        )
-        .addTo(map)
-        .bindPopup('現在地');
+        // 経路表示後も青い現在地マーカーだけは追従させる
+        startLocationWatch(false);
 
         resolve(meLatLng);
       },
@@ -811,7 +819,7 @@ function getCurrentLocation(){
       {
         enableHighAccuracy:true,
         timeout:10000,
-        maximumAge:15000
+        maximumAge:0
       }
     );
   });
@@ -847,7 +855,7 @@ async function showRoute(destination){
   st.textContent='現在地を確認しています…';
 
   try{
-    const origin=meLatLng || await getCurrentLocation();
+    const origin=await getCurrentLocation();
 
     routeAbortController=new AbortController();
     const timeoutId=setTimeout(
