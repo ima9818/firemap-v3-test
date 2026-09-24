@@ -93,6 +93,35 @@ button{
   font-size:12px;
 }
 
+#routeChoices{
+  display:flex;
+  flex-direction:column;
+  gap:6px;
+  margin:7px 0;
+}
+
+.route-choice{
+  display:flex;
+  align-items:center;
+  gap:8px;
+  width:100%;
+  padding:8px;
+  text-align:left;
+  background:#fff;
+  font-size:13px;
+}
+
+.route-choice.active{
+  border:2px solid #111;
+}
+
+.route-swatch{
+  width:28px;
+  height:6px;
+  border-radius:4px;
+  flex:0 0 auto;
+}
+
 #clearRoute{
   width:100%;
   margin-top:7px;
@@ -178,6 +207,7 @@ button{
 
 <div id="routePanel" role="status" aria-live="polite">
   <div id="routeSummary"></div>
+  <div id="routeChoices"></div>
   <div>参考経路です。消防車両の通行可否・道路幅・規制・現場状況は保証されません。</div>
   <div>検索時は現在地と選択した水利の座標だけを経路サーバーへ送信します。</div>
   <div>
@@ -235,6 +265,7 @@ const manualArea=document.getElementById('manualArea');
 const backIncident=document.getElementById('backIncident');
 const routePanel=document.getElementById('routePanel');
 const routeSummary=document.getElementById('routeSummary');
+const routeChoices=document.getElementById('routeChoices');
 const clearRoute=document.getElementById('clearRoute');
 
 let incident=null;
@@ -244,7 +275,9 @@ let circles=[];
 let me=null;
 let meLatLng=null;
 let locationWatchId=null;
-let routeLine=null;
+let routeLines=[];
+let routeResults=[];
+let selectedRouteIndex=0;
 let routeAbortController=null;
 let routeRequestInProgress=false;
 
@@ -323,14 +356,14 @@ function pop(p,ll){
         href="https://www.google.com/maps/dir/?api=1&destination=${destination}"
         target="_blank"
         rel="noopener">
-       Googleマップで経路
+       Googleマップで経路案内
      </a>`;
 
   html+=
     `<button class="route-map"
        data-lat="${ll.lat}"
        data-lng="${ll.lng}">
-       地図上に経路表示
+       この地図で経路を確認
      </button>`;
 
   return html;
@@ -835,12 +868,81 @@ function clearRouteLine(){
 
   routeRequestInProgress=false;
 
-  if(routeLine){
-    map.removeLayer(routeLine);
-    routeLine=null;
+  routeLines.forEach(
+    line=>map.removeLayer(line)
+  );
+
+  routeLines=[];
+  routeResults=[];
+  selectedRouteIndex=0;
+  routeChoices.innerHTML='';
+  routePanel.style.display='none';
+}
+
+
+const ROUTE_COLORS=[
+  '#1261d8',
+  '#d97706',
+  '#16803a'
+];
+
+
+function routeLabel(route,index){
+
+  const km=(route.distance/1000).toFixed(1);
+  const min=Math.max(
+    1,
+    Math.round(route.duration/60)
+  );
+
+  return `経路候補${index+1}　${km}km・約${min}分`;
+}
+
+
+function selectRoute(index,fit=false){
+
+  if(!routeLines[index] || !routeResults[index]){
+    return;
   }
 
-  routePanel.style.display='none';
+  selectedRouteIndex=index;
+
+  routeLines.forEach((line,i)=>{
+    line.setStyle({
+      color:ROUTE_COLORS[i] || '#666',
+      weight:i===index ? 8 : 5,
+      opacity:i===index ? .9 : .5
+    });
+
+    if(i===index){
+      line.bringToFront();
+    }else{
+      line.bringToBack();
+    }
+  });
+
+  routeChoices
+    .querySelectorAll('.route-choice')
+    .forEach((button,i)=>{
+      button.classList.toggle(
+        'active',
+        i===index
+      );
+    });
+
+  routeSummary.textContent=
+    `選択中：${routeLabel(routeResults[index],index)}（OSRM）`;
+
+  if(fit){
+    map.fitBounds(
+      routeLines[index].getBounds(),
+      {
+        paddingTopLeft:[20,150],
+        paddingBottomRight:[20,100],
+        maxZoom:17
+      }
+    );
+  }
 }
 
 
@@ -869,7 +971,7 @@ async function showRoute(destination){
     const url=
       'https://routing.openstreetmap.de/routed-car/route/v1/driving/'
       +coordinates
-      +'?overview=full&geometries=geojson&steps=false';
+      +'?overview=full&geometries=geojson&steps=false&alternatives=2';
 
     let response;
 
@@ -895,28 +997,66 @@ async function showRoute(destination){
       throw new Error('道路経路が見つかりませんでした');
     }
 
-    if(routeLine){
-      map.removeLayer(routeLine);
-    }
+    routeLines.forEach(
+      line=>map.removeLayer(line)
+    );
 
-    const route=data.routes[0];
+    routeLines=[];
+    routeResults=data.routes.slice(0,3);
+    selectedRouteIndex=0;
+    routeChoices.innerHTML='';
 
-    routeLine=L.geoJSON(
-      route.geometry,
-      {
-        style:{
-          color:'#1261d8',
-          weight:7,
-          opacity:.85
-        },
-        interactive:false
-      }
-    ).addTo(map);
+    routeResults.forEach((route,index)=>{
 
-    routeLine.bringToBack();
+      const line=L.geoJSON(
+        route.geometry,
+        {
+          style:{
+            color:ROUTE_COLORS[index] || '#666',
+            weight:index===0 ? 8 : 5,
+            opacity:index===0 ? .9 : .5
+          },
+          interactive:true
+        }
+      ).addTo(map);
+
+      line.on(
+        'click',
+        ()=>selectRoute(index,true)
+      );
+
+      routeLines.push(line);
+
+      const button=document.createElement('button');
+      button.type='button';
+      button.className=
+        'route-choice'+(index===0 ? ' active' : '');
+
+      const swatch=document.createElement('span');
+      swatch.className='route-swatch';
+      swatch.style.backgroundColor=
+        ROUTE_COLORS[index] || '#666';
+
+      const label=document.createElement('span');
+      label.textContent=routeLabel(route,index);
+
+      button.append(swatch,label);
+      button.addEventListener(
+        'click',
+        ()=>selectRoute(index,true)
+      );
+
+      routeChoices.appendChild(button);
+    });
+
+    selectRoute(0,false);
+
+    const allBounds=L.featureGroup(
+      routeLines
+    ).getBounds();
 
     map.fitBounds(
-      routeLine.getBounds(),
+      allBounds,
       {
         paddingTopLeft:[20,150],
         paddingBottomRight:[20,100],
@@ -924,11 +1064,12 @@ async function showRoute(destination){
       }
     );
 
-    routeSummary.textContent=
-      `参考経路：約${(route.distance/1000).toFixed(1)}km・約${Math.max(1,Math.round(route.duration/60))}分（OSRM）`;
-
     routePanel.style.display='block';
-    st.textContent='参考経路を表示しました';
+
+    st.textContent=
+      routeResults.length>1
+        ? `参考経路を${routeResults.length}件表示しました`
+        : '参考経路を表示しました（代替経路なし）';
 
   }catch(e){
     const message=e.name==='AbortError'
